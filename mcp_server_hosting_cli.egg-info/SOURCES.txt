@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+mcp_host/__init__.py
+mcp_host/backend/deployment.py
+mcp_host/backend/generator.py
+mcp_host/cli/main.py
+mcp_host/tools/calculator.py
+mcp_host/tools/calendar.py
+mcp_host/tools/search.py
+mcp_host/tools/weather.py
+mcp_server_hosting_cli.egg-info/PKG-INFO
+mcp_server_hosting_cli.egg-info/SOURCES.txt
+mcp_server_hosting_cli.egg-info/dependency_links.txt
+mcp_server_hosting_cli.egg-info/entry_points.txt
+mcp_server_hosting_cli.egg-info/requires.txt
+mcp_server_hosting_cli.egg-info/top_level.txt

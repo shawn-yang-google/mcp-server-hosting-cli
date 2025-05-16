@@ -1,0 +1,32 @@
+# Web scraping
+playwright>=1.41.0
+html5lib>=1.1
+
+# Search engine
+duckduckgo-search>=7.2.1
+
+# LLM integration
+openai>=1.59.8 # o1 support
+anthropic>=0.42.0
+python-dotenv>=1.0.0
+
+# Testing
+unittest2>=1.1.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.5
+
+# Google Generative AI
+google-generativeai
+
+# gRPC, for Google Generative AI preventing WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+grpcio==1.70.0
+
+# MCP Hosting Service Dependencies
+typer>=0.9.0  # CLI framework
+fastapi>=0.109.0  # Backend API
+uvicorn>=0.27.0  # ASGI server
+pydantic>=2.6.0  # Data validation
+google-cloud-run>=0.10.0  # Cloud Run deployment
+google-cloud-secret-manager>=2.18.0  # Secret management
+docker>=7.0.0  # Docker API
+fastmcp>=0.1.0  # MCP server implementation

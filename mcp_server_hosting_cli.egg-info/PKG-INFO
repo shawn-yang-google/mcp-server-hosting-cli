@@ -1,0 +1,184 @@
+Metadata-Version: 2.4
+Name: mcp-server-hosting-cli
+Version: 0.1.0
+Summary: A command-line tool for creating and deploying MCP servers
+Author-email: Shawn Yang <xiaolongyang@google.com>
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.0.0
+Requires-Dist: google-cloud-run>=0.7.0
+Requires-Dist: google-auth>=2.0.0
+Requires-Dist: mcp>=1.9.0
+
+# MCP Server Hosting Service
+
+A command-line tool that makes it easy to create, configure, and deploy custom MCP (Model Context Protocol) servers. These servers enable you to connect your chosen tools (e.g., Google Calendar) to LLM clients that support MCP.
+
+## Prerequisites
+
+- Python 3.10 or higher
+- Google Cloud Platform (GCP) account with:
+  - Cloud Run API enabled
+  - Appropriate permissions to deploy Cloud Run services
+  - GCP credentials configured locally
+
+## Installation
+
+1. Make sure you have **Python 3.10 or higher** installed. You can check your version with:
+```bash
+python3 --version
+```
+
+2. Create and activate a virtual environment (using Python 3.10+):
+```bash
+python3.10 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install the package in editable (development) mode using `pyproject.toml`:
+```bash
+python3 -m pip install -e .
+```
+
+This will install all required dependencies and make the `mcp-host` CLI available in your environment.
+
+## Quick Start
+
+1. Ensure you're authenticated with GCP:
+```bash
+gcloud auth login
+```
+
+2. List available tools:
+```bash
+mcp-host list-tools
+```
+
+3. Create a new MCP server:
+```bash
+mcp-host create-server --name my-server --tools google-calendar,weather
+```
+
+4. Deploy your server:
+```bash
+mcp-host deploy-server --name my-server
+```
+
+5. Get connection details:
+```bash
+mcp-host get-config --name my-server
+```
+
+## CLI Commands
+
+### List Available Tools
+```bash
+mcp-host list-tools
+```
+Lists all available tools that can be added to your MCP server, including their descriptions and required configurations.
+
+### Create a New Server
+```bash
+mcp-host create-server --name <server-name> --tools <tool1,tool2,...>
+```
+Creates a new MCP server configuration with the specified tools.
+
+Options:
+- `--name`: Unique name for your server
+- `--tools`: Comma-separated list of tool identifiers
+
+Example:
+```bash
+mcp-host create-server --name my-calendar-server --tools google-calendar,weather
+```
+
+### Deploy a Server
+```bash
+mcp-host deploy-server --name <server-name>
+```
+Deploys your configured MCP server to Google Cloud Run.
+
+Example:
+```bash
+mcp-host deploy-server --name my-calendar-server
+```
+
+### Get Server Configuration
+```bash
+mcp-host get-config --name <server-name>
+```
+Retrieves connection details for your deployed server, including:
+- Server URL
+- Example client code
+- Connection parameters
+
+Example:
+```bash
+mcp-host get-config --name my-calendar-server
+```
+
+### List Your Servers
+```bash
+mcp-host list-my-servers
+```
+Shows all your deployed MCP servers and their current status.
+
+### Delete a Server
+```bash
+mcp-host delete-server --name <server-name>
+```
+Removes a deployed MCP server and its associated resources.
+
+Example:
+```bash
+mcp-host delete-server --name my-calendar-server
+```
+
+## Tool Configuration
+
+Some tools require additional configuration or credentials. When you create a server with such tools, the CLI will prompt you for the necessary information.
+
+### Example: Google Calendar Tool
+When adding the Google Calendar tool, you'll need to provide:
+- OAuth credentials
+- Calendar ID
+- Required permissions
+
+## Using Your MCP Server
+
+Once deployed, you can connect to your MCP server using any MCP-compatible client. The `get-config` command provides example code for connecting to your server.
+
+Example Python client code:
+```python
+from mcp import Client
+
+client = Client("https://your-server-url.run.app")
+response = client.tools.google_calendar.list_events()
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Deployment Fails**
+   - Check your GCP credentials and permissions
+   - Ensure Cloud Run API is enabled
+   - Verify your tool configurations
+
+2. **Server Not Responding**
+   - Check the server status using `list-my-servers`
+   - Verify the server URL from `get-config`
+   - Check Cloud Run logs in GCP Console
+
+3. **Tool Configuration Issues**
+   - Verify tool credentials
+   - Check required permissions
+   - Ensure all required parameters are provided
+
+## Support
+
+For issues and feature requests, please open an issue in the GitHub repository.
+
+## License
+
+[Your License Here] 
