@@ -10,6 +10,7 @@ from rich.panel import Panel
 from rich import print as rprint
 import os
 import asyncio
+import ast
 import sys
 from typing import Any
 from urllib.parse import urlparse
@@ -437,6 +438,121 @@ async def discover_mcp_capabilities(server_sse_url: str):
         # traceback.print_exc()
         sys.exit(1)
 
+@cli.command("call-tool")
+def call_tool(
+    tool_name: str = typer.Argument(..., help="Name of the tool to call."),
+    tool_args: List[str] = typer.Option(
+        [],  # Default to an empty list
+        "--tool-arg",
+        "-ta",
+        help="Tool arguments in key=value format. Values are parsed as Python literals (e.g., 'numbers=[1,2,3]', 'enabled=True', 'name=\"Alice\"'). For simple unquoted strings (e.g. 'operation=add'), quotes are optional. Can be specified multiple times."
+    ),
+    url: Optional[str] = typer.Option(
+        None,
+        "--url",
+        "-u",
+        help="URL of the MCP server's SSE endpoint. If provided, this URL is used directly, overriding the name lookup. Example: http://localhost:10000/sse"
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Name of the MCP server (from deployment config) to connect to. Used if --url is not provided."
+    ),
+):
+    """Call a specified tool on an MCP server with given arguments."""
+    server_sse_url: str
+    if url:
+        server_sse_url = url
+    else:
+        if not name:
+            console.print(f"[red]Error: Must define either --url or --name when calling a tool.[/red]")
+            raise typer.Exit(code=1)
+        # Assuming deployment_manager is available in this scope.
+        resolved_url_base = deployment_manager.get_service_url(name)
+        if not resolved_url_base:
+            console.print(f"[red]Error: Server '{name}' not found or its URL could not be retrieved.[/red]")
+            raise typer.Exit(code=1)
+        # Append /sse similar to get-server-capabilities logic
+        server_sse_url = resolved_url_base + "/sse"
+
+    parsed_tool_kwargs: Dict[str, Any] = {}
+    if tool_args:
+        for arg_pair in tool_args:
+            if "=" not in arg_pair:
+                console.print(f"[yellow]Warning: Skipping malformed tool argument '[b]{arg_pair}[/b]'. Expected format: key=value.[/yellow]")
+                continue
+            
+            key, value_str = arg_pair.split("=", 1)
+            try:
+                # ast.literal_eval is safer than eval and can parse Python literals:
+                # strings, numbers, tuples, lists, dicts, booleans, None.
+                parsed_tool_kwargs[key] = ast.literal_eval(value_str)
+            except (ValueError, SyntaxError):
+                # If ast.literal_eval fails (e.g., for an unquoted string like 'add' in 'operation=add'),
+                # treat the value as a plain string.
+                # This allows users to pass simple strings without needing to quote them,
+                # e.g., --tool-arg operation=add
+                # If they need to pass a string that looks like a literal (e.g., "True" as a string),
+                # they should quote it: --tool-arg "value='True'"
+                parsed_tool_kwargs[key] = value_str
+
+    if not tool_name: # Should be caught by typer.Argument(...) being required
+        console.print("[red]Error: Tool name is required.[/red]")
+        raise typer.Exit(code=1)
+
+    # Assuming call_mcp_tool is defined in the same file or imported.
+    asyncio.run(call_mcp_tool(server_sse_url, tool_name, **parsed_tool_kwargs))
+
+async def call_mcp_tool(server_sse_url: str, tool_name: str, **tool_kwargs):
+    """
+    Connects to an MCP server via SSE, initializes a session,
+    and calls a specified tool with the given arguments.
+    """
+    print(f"Attempting to connect to MCP server at SSE endpoint: {server_sse_url}")
+    print(f"Attempting to call tool '{tool_name}' with arguments: {tool_kwargs}")
+
+    try:
+        # Establish the SSE connection
+        async with sse_client(server_sse_url) as (readable_stream, writable_stream):
+            print("SSE connection established.")
+
+            # Create and initialize an MCP client session using the SSE streams
+            async with ClientSession(readable_stream, writable_stream) as session:
+                print("Initializing MCP session...")
+                await session.initialize()
+                print("MCP session initialized successfully.")
+                print("-" * 30) # Separator
+
+                # Call the specified tool
+                print(f"Calling tool: {tool_name} with arguments: {tool_kwargs}")
+                # Assuming the method to call a tool is `call_tool`
+                # and it accepts tool name and keyword arguments for tool parameters.
+                # Adjust if your MCP client library uses a different method or signature.
+                result = await session.call_tool(tool_name, tool_kwargs)
+                
+                print("-" * 30)
+                print("Tool call successful. Result:")
+                print(result)
+                print("-" * 30)
+
+    except ConnectionRefusedError:
+        print(f"Error: Connection refused. Ensure the MCP server is running at {server_sse_url} and accessible.")
+        sys.exit(1)
+    except AttributeError as e:
+        # This might happen if session does not have 'call_tool' or the tool_name is wrong
+        # leading to an issue within the library when trying to find/call the tool.
+        print(f"An error occurred, possibly related to the tool name or client library: {e}")
+        print("Please ensure the tool name is correct and the client session object supports 'call_tool'.")
+        print("Details:", e.__class__.__name__)
+        sys.exit(1)
+    except Exception as e:
+        # Catching a broader exception for unexpected issues
+        print(f"An error occurred during the tool call: {e}")
+        print("Details:", e.__class__.__name__)
+        # import traceback
+        # traceback.print_exc() # Uncomment for more detailed debugging
+        sys.exit(1)
 
 def get_tool_info(module):
     """Get tool information from a module."""

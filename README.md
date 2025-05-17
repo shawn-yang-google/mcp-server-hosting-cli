@@ -163,3 +163,28 @@ Example:
 ```bash
 mcp-host delete-server --name my-server
 ```
+
+### Call a Tool on a Server
+```bash
+mcp-host call-tool <tool-name> --name <server-name> [--url <sse-url>] [--tool-arg <key=value> ...]
+```
+Connects to a deployed MCP server and calls a specified tool with the given arguments.
+
+Options:
+- `<tool-name>`: (Required) The name of the tool to call (e.g., `basic_math`, `advanced_math`).
+- `--name`: The name of the deployed server (from deployment config). Used if `--url` is not provided.
+- `--url`: (Optional) Direct SSE URL of the MCP server. Overrides `--name` lookup. Example: `http://localhost:8000/sse`
+- `--tool-arg` / `-ta`: (Optional) Argument for the tool, in `key=value` format. Can be specified multiple times. Values are parsed as Python literals (e.g., `numbers=[1,2,3]`, `enabled=True`, `name="Alice"`). For simple unquoted strings (e.g. `operation=add`), quotes are optional.
+
+Example:
+```bash
+# Call 'advanced_math' tool on 'my-calculator-server'
+mcp-host call-tool advanced_math --name my-calculator-server \
+    --tool-arg "operation=sqrt" \
+    --tool-arg "number=25"
+
+# Call 'basic_math' using a direct URL and a list argument
+mcp-host call-tool basic_math --url http://localhost:8000/sse \
+    --tool-arg "operation=add" \
+    --tool-arg "numbers=[10,20,30]"
+```
