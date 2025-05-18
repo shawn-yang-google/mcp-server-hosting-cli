@@ -7,7 +7,7 @@ from typing import Any, Dict
 import logging
 import httpx
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import Context
 from mcp_host import app_setup
 
 NWS_API_BASE = "https://api.weather.gov"

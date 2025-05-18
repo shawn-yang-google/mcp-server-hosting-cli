@@ -4,7 +4,7 @@ Sample calendar tool implementation.
 
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import Context
 from mcp_host import app_setup
 
 # Initialize events storage

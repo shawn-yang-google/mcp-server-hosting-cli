@@ -75,25 +75,25 @@ Developers, AI practitioners, and technically savvy users who want to extend the
 - The service must be able to deploy this Docker image as a new, unique Google Cloud Run service.
 - Each user server should run as an isolated Cloud Run service.
 
-#### FR-5: Credential Management for Tools (Backend)
-- The service must provide a mechanism for users to supply credentials/tokens needed by tools (e.g., API keys, OAuth tokens).
-- These credentials must be securely stored (e.g., using GCP Secret Manager) and made available to the corresponding Cloud Run service environment.
-- *MVP Simplification:* Initially, this might rely on users manually providing tokens that are then configured as environment variables for the Cloud Run service.
-
-#### FR-6: CLI Interface
+#### FR-5: CLI Interface
 - The CLI must support all actions defined in the User Stories (list tools, create server, deploy, get config, list servers, delete server).
 - The CLI will interact with the backend API of the MCP Hosting Service.
 
 ### Non-Functional Requirements
 
-#### NFR-3: Reliability
+#### FR-1: Credential Management for Tools (Backend)
+- The service must provide a mechanism for users to supply credentials/tokens needed by tools (e.g., API keys, OAuth tokens).
+- These credentials must be securely stored (e.g., using GCP Secret Manager) and made available to the corresponding Cloud Run service environment.
+- *MVP Simplification:* Initially, this might rely on users manually providing tokens that are then configured as environment variables for the Cloud Run service.
+
+#### NFR-2: Reliability
 - The deployed MCP servers should be reliable. Cloud Run provides good uptime.
 - The hosting service itself should be reliable.
 
-#### NFR-4: Maintainability
+#### NFR-3: Maintainability
 - The codebase for the backend service and tool implementations should be well-structured and maintainable.
 
-#### NFR-5: Usability (CLI)
+#### NFR-4: Usability (CLI)
 - The CLI should be intuitive and provide clear feedback to the user.
 
 ## Technical Approach (High-Level)
@@ -109,7 +109,6 @@ Developers, AI practitioners, and technically savvy users who want to extend the
 ## Out of Scope (for this CLI-Focused MVP)
 
 - **Web-based User Interface:** All interactions are via CLI.
-- **User Interface for OAuth Flows:** For tools requiring OAuth, MVP might assume users pre-configure tokens or provide them directly. A guided OAuth flow via the service is out of scope for MVP.
 - **Advanced User Management:** Beyond GCP identity.
 - **Billing and Quotas:** Users will incur GCP costs directly for their Cloud Run services. No integrated billing within the hosting service itself.
 - **Custom User-Provided Tool Code:** Users can only select from a pre-defined list of tools.

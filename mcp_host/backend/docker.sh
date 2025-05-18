@@ -5,7 +5,7 @@ set -e
 REGISTRY_DOMAIN=$1
 IMAGE=$2
 DEPLOY_DIR=$3
-LOCAL_TEST_PORT=${4:-10000} # Default to 10000 if not provided for local testing
+# LOCAL_TEST_PORT=${4:-10000} # Default to 10000 if not provided for local testing
 
 # Log messages with timestamps
 log() {

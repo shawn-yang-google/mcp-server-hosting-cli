@@ -3,7 +3,7 @@ Sample search tool implementation.
 """
 
 from typing import Dict, Any, List
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import Context
 from duckduckgo_search import DDGS
 from mcp_host import app_setup
 

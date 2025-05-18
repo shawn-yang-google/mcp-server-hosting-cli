@@ -9,10 +9,12 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import print as rprint
 import os
+import importlib
+import inspect
 import asyncio
 import ast
 import sys
-from typing import Any
+from typing import Any, Dict
 from urllib.parse import urlparse
 import importlib
 import inspect
@@ -26,7 +28,6 @@ from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 
 from ..backend.deployment import DeploymentManager
-from ..tools import weather, calendar, search, calculator
 
 cli = typer.Typer(
     name="mcp-host",
@@ -102,24 +103,6 @@ class SSEHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404, "File not found")
 
-def _run_sse_server(host: str, port: int):
-    with socketserver.TCPServer((host, port), SSEHandler) as httpd:
-        console.print(f"[green]Serving SSE on http://{host}:{port}/events[/green]")
-        console.print(f"Open http://{host}:{port}/ to view the client.")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Keyboard interrupt received, shutting down SSE server.[/yellow]")
-            httpd.server_close()
-
-@cli.command()
-def serve_sse(
-    host: str = typer.Option(SSE_HOST, "--host", "-h", help="Hostname for the SSE server"),
-    port: int = typer.Option(SSE_PORT, "--port", "-p", help="Port for the SSE server"),
-):
-    """Run a simple Server-Sent Events (SSE) server."""
-    _run_sse_server(host, port)
-
 def get_gcloud_project():
     """Try to get the default GCP project from gcloud config."""
     try:
@@ -170,6 +153,33 @@ def get_tool_info(module):
             
     return tools
 
+def _load_tool_modules() -> List[Any]:
+    """Dynamically discovers and loads tool modules from the 'mcp_host/tools' directory."""
+    loaded_modules = []
+    # Construct the path to the 'tools' directory relative to this file (main.py)
+    # main.py is in mcp_host/cli/, so ../tools points to mcp_host/tools/
+    tools_dir_path = os.path.join(os.path.dirname(__file__), "..", "tools")
+    
+    if not os.path.isdir(tools_dir_path):
+        console.print(f"[red]Tools directory not found at: {tools_dir_path}[/red]")
+        return []
+
+    for filename in os.listdir(tools_dir_path):
+        if filename.endswith(".py") and filename != "__init__.py":
+            module_name_simple = filename[:-3]
+            # The import path should be relative to the package root (mcp_host)
+            # e.g., mcp_host.tools.weather
+            module_import_path = f"mcp_host.tools.{module_name_simple}"
+            try:
+                module = importlib.import_module(module_import_path)
+                loaded_modules.append(module)
+            except ImportError as e:
+                console.print(f"[red]Failed to import tool module '{module_name_simple}': {e}[/red]")
+    return loaded_modules
+
+# Load tool modules once at startup, or call this function where needed
+ALL_TOOL_MODULES = _load_tool_modules()
+
 @cli.command()
 def list_tools():
     """List all available pre-integrated tools."""
@@ -183,9 +193,8 @@ def list_tools():
     # Get tools from each module
     all_tools = []
     
-    # Debug info
-    console.print("[yellow]Searching for tools in modules...[/yellow]")
-    for module in [weather, calendar, search, calculator]:
+    console.print("[yellow]Searching for tools in mcp_host/tools/...[/yellow]")
+    for module in ALL_TOOL_MODULES:
         console.print(f"[cyan]Module: {module.__name__}[/cyan]")
         for name, func in inspect.getmembers(module, inspect.isfunction):
             console.print(f"  Function: {name}")
@@ -213,27 +222,35 @@ def create_server(
     tool_ids = [t.strip() for t in tools.split(",")]
     
     # Validate tools
-    all_tools = []
-    for module in [weather, calendar, search, calculator]:
-        all_tools.extend(get_tool_info(module))
+    all_available_tools_info = []
+    # Use the dynamically loaded modules
+    if not ALL_TOOL_MODULES:
+        console.print("[red]Error: No tool modules were loaded. Cannot create server.[/red]")
+        console.print("[dim]Please ensure your tools are in the 'mcp_host/tools' directory and are importable.[/dim]")
+        return
+
+    for module in ALL_TOOL_MODULES:
+        all_available_tools_info.extend(get_tool_info(module))
     
-    valid_tool_ids = {tool["id"] for tool in all_tools}
+    valid_tool_ids = {tool["id"] for tool in all_available_tools_info}
     invalid_tools = [tool_id for tool_id in tool_ids if tool_id not in valid_tool_ids]
     
     if invalid_tools:
         console.print(f"[red]Error: Invalid tool IDs: {', '.join(invalid_tools)}[/red]")
+        console.print(f"[dim]Available tool IDs: {', '.join(sorted(list(valid_tool_ids)))}[/dim]")
         return
 
     try:
         # Organize tools by module
-        tool_modules = {}
+        tool_modules_map = {} # Renamed from tool_modules to avoid conflict with loop var
         for tool_id in tool_ids:
-            for module in [weather, calendar, search, calculator]:
+            # Iterate over the dynamically loaded modules
+            for module in ALL_TOOL_MODULES:
                 if hasattr(module, tool_id):
                     module_name_key = module.__name__.split(".")[-1]
-                    if module_name_key not in tool_modules:
-                        tool_modules[module_name_key] = []
-                    tool_modules[module_name_key].append(tool_id)
+                    if module_name_key not in tool_modules_map:
+                        tool_modules_map[module_name_key] = []
+                    tool_modules_map[module_name_key].append(tool_id)
                     break
         
         # --- Refactored server file generation ---
@@ -241,10 +258,11 @@ def create_server(
         
         # 1. Prepare strings for template substitution
         server_name = name
-        module_keys_string = ", ".join(tool_modules.keys())
+        # Use keys from tool_modules_map for module_keys_string
+        module_keys_string = ", ".join(tool_modules_map.keys()) 
         specific_tool_imports_string = "\n".join(
-            f'from mcp_host.tools.{module_name} import {", ".join(tools)}'
-            for module_name, tools in tool_modules.items()
+            f'from mcp_host.tools.{module_name} import {", ".join(selected_tools)}'
+            for module_name, selected_tools in tool_modules_map.items()
         )
 
         try:

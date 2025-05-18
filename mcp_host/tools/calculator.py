@@ -4,7 +4,7 @@ Sample calculator tool implementation.
 
 from typing import Dict, Any, List
 import math
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import Context
 from mcp_host import app_setup
 
 @app_setup.mcp_app.tool()
