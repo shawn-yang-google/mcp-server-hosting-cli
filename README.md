@@ -92,11 +92,79 @@ To use this tool effectively, the authenticated GCP user or service account need
 You have now created and deployed your custom MCP server.
 You are now ready to use your server anywhere!
 
-Refer to:
+Next Steps:
+* ["Deploy from Git Repo"](#deploy-from-git-repo) section on how to deploy an existing application from a Git repository.
 * ["Creating Custom Tools"](#creating-custom-tools) section on how to add your own custom tools and use the CLI to deploy them.
 * ["Programmatic Usage with Deployed Servers"](#programmatic-usage-with-deployed-servers) section on how to programmatically use the deployed server.
 * ["CLI Commands"](#cli-commands) section for more details on each command.
 
+## Deploy from Git Repo
+
+This section explains how to deploy an existing application, containerized with a Dockerfile, directly from a Git repository to Google Cloud Run. This is useful if you have a pre-existing service or an MCP server with a custom setup that you manage in its own repository.
+
+### Deploy from Git Repo Quick Start
+
+1.  **Ensure your Git repository is ready:**
+    *   Your repository must contain a `Dockerfile`.
+    *   Your application within the Docker image should be configured to listen on a specific port. By default, the CLI assumes this port is `8080`. If your application uses a different port, or if you want it to listen on a port specified by the `PORT` environment variable (which Cloud Run sets), you'll need to specify this during deployment.
+
+2.  **Authenticate with GCP and set your default project (if not already done):**
+    ```bash
+    gcloud auth login
+    gcloud config set project <YOUR_GCP_PROJECT_ID> # Replace YOUR_GCP_PROJECT_ID
+    ```
+
+3.  **Deploy the application from your Git repository:**
+    Replace `<YOUR_SERVICE_NAME>` with the desired name for your Cloud Run service and `<YOUR_GIT_REPO_URL>` with the URL of your Git repository.
+    ```bash
+    mcp-host deploy-git-repo \
+        --name <YOUR_SERVICE_NAME> \
+        --git-repo-url <YOUR_GIT_REPO_URL>
+    ```
+    *   **Specify Dockerfile location (optional):** If your Dockerfile is not at the root of the repository, use the `--dockerfile-path` option:
+        ```bash
+        mcp-host deploy-git-repo --name <YOUR_SERVICE_NAME> \
+            --git-repo-url <YOUR_GIT_REPO_URL> \
+            --dockerfile-path path/to/your/Dockerfile
+        ```
+    *   **Specify Container Port (important):** If your application inside the Docker container listens on a port other than `8080`, or if you want to explicitly set the port that Cloud Run expects, use the `--container-port` option. Your application must be configured to listen on this port, or to respect the `PORT` environment variable which Cloud Run will set to this value.
+        ```bash
+        mcp-host deploy-git-repo --name <YOUR_SERVICE_NAME> \
+            --git-repo-url <YOUR_GIT_REPO_URL> \
+            --container-port <YOUR_APP_PORT> # e.g., 3000
+        ```
+    *   **Specify GCP Project (optional):** If you need to deploy to a specific project, different from your gcloud default:
+        ```bash
+        mcp-host deploy-git-repo --name <YOUR_SERVICE_NAME> \
+            --git-repo-url <YOUR_GIT_REPO_URL> \
+            --project <YOUR_GCP_PROJECT_ID>
+        ```
+
+4.  **Get the deployed service's URL:**
+    Once deployed, retrieve its public URL.
+    ```bash
+    mcp-host get-server-url --name <YOUR_SERVICE_NAME>
+    ```
+    If your deployed service is an MCP server, you can then use `get-server-capabilities` and `call-tool` as described in other sections, making sure to use the correct URL and endpoint suffix if it's not the default `/sse`.
+
+### How Deploy from Git Repo Works
+
+When you use the `mcp-host deploy-git-repo` command, the CLI performs the following steps:
+
+1.  **Clones Repository**: The specified Git repository is cloned into a temporary local directory.
+2.  **Ensures Artifact Registry**: It verifies that an Artifact Registry repository named `mcp-server-images` exists in your configured GCP project and region, creating it if necessary. This repository will store the Docker images.
+3.  **Builds Docker Image**:
+    *   It locates the `Dockerfile` within the cloned repository (either at the root or at the path specified by `--dockerfile-path`).
+    *   The `mcp_host/backend/docker.sh` script is invoked to build a Docker image using this `Dockerfile` and the cloned repository's root as the build context.
+    *   The built image is tagged with a name like `REGION-docker.pkg.dev/PROJECT_ID/mcp-server-images/SERVICE_NAME`.
+4.  **Pushes Image**: The newly built Docker image is pushed to your project's Artifact Registry.
+5.  **Deploys to Cloud Run**:
+    *   The `mcp_host/backend/container.sh` script is then used to deploy the image from Artifact Registry to Google Cloud Run.
+    *   The `--container-port` argument provided to the CLI (defaulting to `8080`) is passed to `gcloud run deploy --port`. This tells Cloud Run which port your application inside the container is listening on.
+    *   **Important for your application**: Your application code within the Docker container must be configured to listen on this specific port. Alternatively, it can be configured to listen on the port specified by the `PORT` environment variable, as Cloud Run will automatically set this environment variable inside your container to match the value passed to `gcloud run deploy --port`.
+6.  **Service URL**: After successful deployment, the CLI can retrieve and display the public URL of your new Cloud Run service.
+
+This process allows you to deploy any containerized application from a Git repository, not just MCP servers generated by this tool, provided it has a valid Dockerfile and is configured correctly for port binding on Cloud Run.
 
 ## Creating Custom Tools
 
@@ -318,37 +386,106 @@ mcp-host create-server --name my-server --tools list_events,create_event,get_for
 
 ### Deploy a Server
 ```bash
-mcp-host deploy-server --name <server-name> [--project <gcp-project-id>]
+mcp-host deploy-server --name <server-name> [--project <gcp-project-id>] [--container-port <port>] [--startup-probe-path <path>]
 ```
-Deploys your configured MCP server to Google Cloud Run. The server is an ASGI application built with Starlette and run using Uvicorn, utilizing Server-Sent Events (SSE) for communication.
+Deploys your configured MCP server to Google Cloud Run. The server is an ASGI application built with Starlette and run using Uvicorn, utilizing Server-Sent Events (SSE) for communication. This command uses the `Dockerfile` at the root of the `mcp-server-hosting-cli` project and the `server_template.py`.
 
 Options:
 - `--name`: Name of your server to deploy
-- `--project`: (Optional) GCP project ID to deploy to (overrides environment variable or gcloud config)
+- `--project`: (Optional) GCP project ID to deploy to (overrides environment variable or gcloud config).
+- `--container-port` / `-cp`: (Optional) The port the application inside the Docker container listens on. Defaults to `8080`. The `server_template.py` (used for this command) respects the `PORT` environment variable set by Cloud Run to this value.
+- `--startup-probe-path` / `-spp`: (Optional) HTTP GET path for the Cloud Run startup probe (e.g., `/healthz`, `/api/health`). If not specified, Cloud Run uses its default path (`/`).
 
 > **Note**: The tool detects your GCP project in the following order:
-> 1. `--project` parameter if provided
-> 2. `GCP_PROJECT_ID` environment variable if set
-> 3. The default project from `gcloud config get-value project`
-> To avoid specifying the project each time, set your default project with `gcloud config set project your-project-id`
+> 1. `--project` parameter if provided.
+> 2. `GCP_PROJECT_ID` environment variable if set (you can `export GCP_PROJECT_ID=<your-project>` before running `mcp-host` commands to set a default for the session).
+> 3. The default project from `gcloud config get-value project`.
+> To avoid specifying the project each time for a session, `export GCP_PROJECT_ID=<your-project-id>` or set your gcloud default project with `gcloud config set project your-project-id`.
 
 Example:
 ```bash
-mcp-host deploy-server --name my-server --project my-gcp-project
+mcp-host deploy-server --name my-weather-server --project my-gcp-project --container-port 3001 --startup-probe-path /health
+```
+
+### Deploy from Git Repository
+```bash
+mcp-host deploy-git-repo --name <service-name> --git-repo-url <git-url> [--dockerfile-path <path/in/repo>] [--container-port <port>] [--startup-probe-path <path>] [--env KEY=VALUE ...] [--project <gcp-project-id>]
+```
+Clones a Git repository, builds its Docker image using the specified (or root) Dockerfile, and deploys it to Google Cloud Run.
+
+Options:
+- `--name` / `-n`: (Required) Unique name for your new Cloud Run service.
+- `--git-repo-url` / `-g`: (Required) URL of the Git repository.
+- `--dockerfile-path` / `-d`: (Optional) Path to the Dockerfile within the repository. Defaults to `Dockerfile` at the repository root.
+- `--container-port` / `-cp`: (Optional) The port your application inside the Docker container listens on. Defaults to `8080`. Your application must be configured to use this port or respect the `PORT` environment variable set by Cloud Run to this value.
+- `--startup-probe-path` / `-spp`: (Optional) HTTP GET path for the Cloud Run startup probe (e.g., `/healthz`, `/api/status`). If not specified, Cloud Run uses its default path (`/`). This is useful if your application's health check endpoint is not at the root.
+- `--env` / `-e`: (Optional) Environment variables to set in the container (e.g., `KEY=VALUE`). Can be specified multiple times. This is crucial for passing configuration like API keys or OAuth client credentials.
+- `--project` / `-p`: (Optional) GCP project ID to deploy to (overrides default project context).
+
+**Important Note on `PUBLIC_URL` for OAuth Callbacks:**
+Some applications deployed from Git (especially those implementing an OAuth2 flow, like the `g2n-mcp-gcal-sse` example) require an environment variable (e.g., `PUBLIC_URL`) to be set to their own public-facing URL. This is used to construct correct redirect URIs for the OAuth provider. Since the public URL is only known *after* the first deployment, you might need a two-step process:
+1. Deploy the service initially (potentially without `PUBLIC_URL`, or with a placeholder if the app requires one to start).
+2. Get the assigned service URL using `mcp-host get-server-url --name <service-name> --raw`.
+3. Re-run the `mcp-host deploy-git-repo` command, this time adding `--env "PUBLIC_URL=<the_obtained_url>"` to update the service with the correct public URL.
+
+Example:
+```bash
+# Deploy a custom app from Git that needs API keys and a specific health check path
+mcp-host deploy-git-repo \
+    --name my-custom-data-app \
+    --git-repo-url https://github.com/my-user/my-data-app.git \
+    --container-port 3000 \
+    --startup-probe-path /api/v1/health \
+    --env "API_KEY=abcdef12345" \
+    --env "DATABASE_URL=..."
+
+# Example for an app like g2n-mcp-gcal-sse requiring OAuth credentials and PUBLIC_URL
+# (assuming MY_CLIENT_ID, MY_CLIENT_SECRET are set in your shell)
+# Step 1: Initial Deploy (PUBLIC_URL might be missing or incorrect for now)
+mcp-host deploy-git-repo \
+    --name my-gcal-mcp \
+    --git-repo-url https://github.com/gabriel-g2n/g2n-mcp-gcal-sse.git \
+    --container-port 3001 \
+    --startup-probe-path /health \
+    --env "GOOGLE_CLIENT_ID=$MY_CLIENT_ID" \
+    --env "GOOGLE_CLIENT_SECRET=$MY_CLIENT_SECRET"
+
+# Step 2: Get the URL (use --raw for scripting)
+SERVICE_URL=$(mcp-host get-server-url --name my-gcal-mcp --raw)
+
+# Step 3: Update the service with the correct PUBLIC_URL
+if [ -n "$SERVICE_URL" ]; then
+  mcp-host deploy-git-repo \
+      --name my-gcal-mcp \
+      --git-repo-url https://github.com/gabriel-g2n/g2n-mcp-gcal-sse.git \
+      --container-port 3001 \
+      --startup-probe-path /health \
+      --env "GOOGLE_CLIENT_ID=$MY_CLIENT_ID" \
+      --env "GOOGLE_CLIENT_SECRET=$MY_CLIENT_SECRET" \
+      --env "PUBLIC_URL=$SERVICE_URL"
+else
+  echo "Failed to get service URL for my-gcal-mcp."
+fi
+
+# After this, you would typically need to go through the app's /auth flow in a browser
+# to authorize it with Google Calendar, before its MCP /sse endpoint is active.
 ```
 
 ### Get Server URL
 ```bash
-mcp-host get-server-url --name <server-name>
+mcp-host get-server-url --name <server-name> [--raw]
 ```
 Retrieves and displays the public URL of a deployed MCP server.
 
 Options:
 - `--name`: The name of the deployed server.
+- `--raw`: (Optional) Output only the raw URL string, without any formatting. Useful for scripting.
 
 Example:
 ```bash
 mcp-host get-server-url --name my-server
+# For scripting:
+MY_URL=$(mcp-host get-server-url --name my-server --raw)
 ```
 
 ### List Your Servers
@@ -373,27 +510,53 @@ Example:
 mcp-host delete-server --name my-server
 ```
 
-### Call a Tool on a Server
+### Get Server Capabilities
 ```bash
-mcp-host call-tool <tool-name> --name <server-name> [--url <sse-url>] [--tool-arg <key=value> ...]
+mcp-host get-server-capabilities [--name <server-name>] [--url <full-mcp-endpoint-url>] [--endpoint-suffix <suffix>]
 ```
-Connects to a deployed MCP server and calls a specified tool with the given arguments.
+Connects to a deployed MCP server and lists its available tools, resources, and prompts.
+You must provide either `--name` (to look up a server deployed by this tool) or a direct `--url`.
 
 Options:
-- `<tool-name>`: (Required) The name of the tool to call (e.g., `basic_math`, `advanced_math`).
-- `--name`: (Optional) The name of the deployed server (from deployment config). Used if `--url` is not provided.
-- `--url`: (Optional) Direct SSE URL of the MCP server. Overrides `--name` lookup. Example: `https://your-server-abcdefg-uc.a.run.app/sse`
-- `--tool-arg` / `-ta`: (Optional) Argument for the tool, in `key=value` format. Can be specified multiple times. Values are parsed as Python literals (e.g., `numbers=[1,2,3]`, `enabled=True`, `name="Alice"`). Quotes are optional for simple unquoted strings (e.g., `operation=add`).
+- `--name` / `-n`: (Optional) The name of the deployed server. Used if `--url` is not provided. The command will fetch the base service URL and append the `--endpoint-suffix`.
+- `--url` / `-u`: (Optional) Full direct URL of the MCP server's capabilities endpoint. If provided, this is used as-is, ignoring `--name` and `--endpoint-suffix`. Example: `https://your-server.a.run.app/custom/mcp_endpoint`
+- `--endpoint-suffix` / `-es`: (Optional) Suffix to append to the base server URL when `--name` is used and `--url` is not. Defaults to `/sse`. Use `""` for no suffix if the base URL itself is the endpoint.
 
 Example:
 ```bash
-# Call 'advanced_math' tool on 'my-calculator-server'
+# Using server name (assumes default /sse suffix for MCP endpoint)
+mcp-host get-server-capabilities --name my-mcp-server
+
+# Using server name with a custom endpoint suffix
+mcp-host get-server-capabilities --name my-mcp-server --endpoint-suffix /api/mcp
+
+# Using a direct full URL to the MCP endpoint
+mcp-host get-server-capabilities --url https://my-other-server.a.run.app/actual-mcp-path
+```
+
+### Call a Tool on a Server
+```bash
+mcp-host call-tool <tool-name> [--name <server-name>] [--url <full-mcp-endpoint-url>] [--endpoint-suffix <suffix>] [--tool-arg <key=value> ...]
+```
+Connects to a deployed MCP server and calls a specified tool with the given arguments.
+You must provide either `--name` (to look up a server deployed by this tool) or a direct `--url`.
+
+Options:
+- `<tool-name>`: (Required) The name of the tool to call.
+- `--name` / `-n`: (Optional) The name of the deployed server. Used if `--url` is not provided. The command will fetch the base service URL and append the `--endpoint-suffix`.
+- `--url` / `-u`: (Optional) Direct full URL of the MCP server's endpoint (typically the SSE endpoint for MCP). If provided, this is used as-is. Example: `https://your-server.a.run.app/custom/sse_or_messages_path`
+- `--endpoint-suffix` / `-es`: (Optional) Suffix to append to the base server URL when `--name` is used and `--url` is not. Defaults to `/sse`. Use `""` for no suffix.
+- `--tool-arg` / `-ta`: (Optional) Argument for the tool, in `key=value` format. Can be specified multiple times.
+
+Example:
+```bash
+# Call 'advanced_math' on 'my-calculator-server' (assumes default /sse suffix)
 mcp-host call-tool advanced_math --name my-calculator-server \
     --tool-arg "operation=sqrt" \
     --tool-arg "number=25"
 
-# Call 'basic_math' using a direct URL and a list argument
-mcp-host call-tool basic_math --url https://your-server-abcdefg-uc.a.run.app/sse \
+# Call 'basic_math' using a direct URL to its MCP endpoint
+mcp-host call-tool basic_math --url https://your-server.a.run.app/my-mcp-handler \
     --tool-arg "operation=add" \
     --tool-arg "numbers=[10,20,30]"
 ```

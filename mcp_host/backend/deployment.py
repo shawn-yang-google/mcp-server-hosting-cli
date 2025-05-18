@@ -4,7 +4,7 @@ Deployment manager for MCP servers.
 
 import os
 import subprocess
-from typing import Optional
+from typing import Optional, Dict
 from google.cloud import run_v2
 from google.cloud.run_v2 import Service
 from google.api_core import exceptions
@@ -12,6 +12,7 @@ import shutil
 import logging # Added for logging
 import tempfile  # For creating temporary bash script
 import json
+import git # For cloning git repository
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
@@ -43,35 +44,38 @@ class DeploymentManager:
                 "gcloud", "artifacts", "repositories", "describe", self.artifact_repository_name,
                 "--project", self.project_id,
                 "--location", self.region,
-            ], check=True, capture_output=True)
+                "--quiet", # Suppress output, just check existence via return code
+            ], check=True, capture_output=True) # capture_output to check stderr if needed
             logger.info(f"Repository {self.artifact_repository_name} already exists.")
         except subprocess.CalledProcessError as e:
-            if "NOT_FOUND" in e.stderr.decode(): # Check if error is because repo not found
-                logger.info(f"Repository {self.artifact_repository_name} not found. Creating...")
-                try:
-                    subprocess.run([
-                        "gcloud", "artifacts", "repositories", "create", self.artifact_repository_name,
-                        "--project", self.project_id,
-                        "--location", self.region,
-                        "--repository-format", "docker",
-                        "--description", "Repository for MCP server images"
-                    ], check=True, capture_output=True)
-                    logger.info(f"Successfully created Artifact Registry repository: {self.artifact_repository_name}")
-                except subprocess.CalledProcessError as create_e:
-                    logger.error(f"Failed to create Artifact Registry repository: {create_e.stderr.decode()}")
-                    raise  # Re-raise the exception if creation fails
-            else:
-                # Some other error occurred during describe
-                logger.error(f"Error checking repository: {e.stderr.decode()}")
-                raise
+            # More robust check for "NOT_FOUND" or if the command failed to find the repo
+            # Some gcloud versions might not have a specific "NOT_FOUND" string but exit with non-zero
+            # when describe fails on a non-existent resource.
+            # We can inspect stderr for messages hinting at not found, or assume creation is needed if describe fails.
+            logger.warning(f"Repository {self.artifact_repository_name} not found or error describing it (stderr: {e.stderr.decode()}). Attempting to create...")
+            try:
+                subprocess.run([
+                    "gcloud", "artifacts", "repositories", "create", self.artifact_repository_name,
+                    "--project", self.project_id,
+                    "--location", self.region,
+                    "--repository-format", "docker",
+                    "--description", "Repository for MCP server images"
+                ], check=True, capture_output=True)
+                logger.info(f"Successfully created Artifact Registry repository: {self.artifact_repository_name}")
+            except subprocess.CalledProcessError as create_e:
+                logger.error(f"Failed to create Artifact Registry repository: {create_e.stderr.decode()}")
+                raise  # Re-raise the exception if creation fails
 
 
-    def _run_deploy_script(self, deploy_dir: str, image: str) -> None:
+    def _run_deploy_script(self, image_name: str, dockerfile_abs_path: str, build_context_abs_path: str, deploy_dir_build_arg: Optional[str] = None) -> None:
         """Run the docker.sh script to handle Docker authentication and deployment.
         
         Args:
-            deploy_dir: Directory containing deployment files
-            image: Full image name to build and push
+            image_name: Full image name to build and push (e.g., REGISTRY_DOMAIN/PROJECT_ID/REPO/IMAGE_ID)
+            dockerfile_abs_path: Absolute path to the Dockerfile.
+            build_context_abs_path: Absolute path to the build context.
+            deploy_dir_build_arg: Optional. Value for the DEPLOY_DIR_ARG build argument.
+                                  Used by the root Dockerfile to locate server.py and requirements.txt.
             
         Raises:
             subprocess.CalledProcessError: If the script execution fails
@@ -85,24 +89,34 @@ class DeploymentManager:
         
         # Run the script with the required parameters
         logger.info(f"Running Docker build and push using {script_path}...")
+        command = [
+            script_path,
+            self.artifact_registry_domain,
+            image_name,
+            dockerfile_abs_path,
+            build_context_abs_path
+        ]
+        if deploy_dir_build_arg:
+            command.append(deploy_dir_build_arg)
+        else:
+            command.append("") # Pass an empty string if no build arg
+
         try:
-            subprocess.run([
-                script_path,
-                self.artifact_registry_domain,
-                image,
-                deploy_dir
-            ], check=True)
+            subprocess.run(command, check=True)
             logger.info("Docker build and push completed successfully.")
         except Exception as e:
             logger.error(f"Docker build and push failed: {str(e)}")
             raise
 
-    def deploy_server(self, name: str, server_file: str) -> str:
-        """Deploy a server to Cloud Run.
+    def deploy_server(self, name: str, server_file: str, container_port: int = 8080, startup_probe_path: Optional[str] = None) -> str:
+        """Deploy a server to Cloud Run (original workflow).
         
         Args:
             name: Server name
-            server_file: Path to server file
+            server_file: Path to server file (e.g., servers/my-server.py)
+            container_port: The port the application inside the container will listen on.
+                            Cloud Run will set the PORT env var to this value.
+            startup_probe_path: Optional. The HTTP path for the startup probe. Defaults to '/'.
             
         Returns:
             The deployed service URL
@@ -111,52 +125,56 @@ class DeploymentManager:
             FileNotFoundError: If server file or requirements.txt doesn't exist
             subprocess.CalledProcessError: If deployment command fails
         """
-        deploy_dir = f"deploy/{name}"
+        deploy_dir_relative_to_project_root = f"deploy/{name}" # e.g., "deploy/my-server"
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")) # Assumes backend is mcp_host/backend/
         
         try:
-            # Ensure Artifact Registry repository exists or create it
             self._ensure_artifact_repository_exists()
 
-            # Create clean temporary directory for deployment
-            if os.path.exists(deploy_dir):
-                shutil.rmtree(deploy_dir)
-            os.makedirs(deploy_dir, exist_ok=True)
+            # Create clean temporary directory for deployment (relative to project root for Docker context)
+            full_deploy_dir_path = os.path.join(project_root, deploy_dir_relative_to_project_root)
+            if os.path.exists(full_deploy_dir_path):
+                shutil.rmtree(full_deploy_dir_path)
+            os.makedirs(full_deploy_dir_path, exist_ok=True)
             
-            # Copy server file
-            if not os.path.exists(server_file):
+            # Copy server file (e.g., servers/my-server.py to deploy/my-server/server.py)
+            if not os.path.exists(server_file): # server_file is likely relative to project root already e.g. "servers/my-server.py"
                 raise FileNotFoundError(f"Server file {server_file} not found")
                 
-            with open(server_file, "r") as src, open(f"{deploy_dir}/server.py", "w") as dst:
+            with open(server_file, "r") as src, open(os.path.join(full_deploy_dir_path, "server.py"), "w") as dst:
                 dst.write(src.read())
             
-            # Copy requirements.txt from project root
-            project_requirements_path = "requirements.txt"
+            # Copy requirements.txt from project root to deploy_dir/requirements.txt
+            project_requirements_path = os.path.join(project_root, "requirements.txt")
             if not os.path.exists(project_requirements_path):
                 raise FileNotFoundError(f"{project_requirements_path} not found in project root. This is needed for the Docker build.")
-            shutil.copy(project_requirements_path, f"{deploy_dir}/requirements.txt")
-            logger.info(f"Copied {project_requirements_path} to {deploy_dir}")
+            shutil.copy(project_requirements_path, os.path.join(full_deploy_dir_path, "requirements.txt"))
+            logger.info(f"Copied {project_requirements_path} to {full_deploy_dir_path}")
 
-            # Copy Dockerfile from project root
-            project_dockerfile_path = "Dockerfile"
+            # The Dockerfile used for this workflow is the one at the project root.
+            project_dockerfile_path = os.path.join(project_root, "Dockerfile")
             if not os.path.exists(project_dockerfile_path):
                 raise FileNotFoundError(f"{project_dockerfile_path} not found in project root. Please create one.")
-            shutil.copy(project_dockerfile_path, f"{deploy_dir}/Dockerfile")
-            logger.info(f"Copied {project_dockerfile_path} to {deploy_dir}")
+            # No need to copy it to deploy_dir, docker.sh will reference it directly.
             
-            # Build and push container to Artifact Registry
-            image = f"{self.artifact_registry_domain}/{self.project_id}/{self.artifact_repository_name}/{name}"
-            logger.info(f"Building and pushing image: {image}")
+            image_name = f"{self.artifact_registry_domain}/{self.project_id}/{self.artifact_repository_name}/{name}"
+            logger.info(f"Building and pushing image for standard server: {image_name}")
             
-            # Use the new script-based approach instead of gcloud builds submit
-            self._run_deploy_script(deploy_dir, image)
+            # For this original workflow, the build context is the project root.
+            # The DEPLOY_DIR_ARG tells the root Dockerfile where to find server.py and requirements.txt
+            # which were copied into the temporary deploy_dir_relative_to_project_root.
+            self._run_deploy_script(
+                image_name=image_name,
+                dockerfile_abs_path=project_dockerfile_path,
+                build_context_abs_path=project_root,
+                deploy_dir_build_arg=deploy_dir_relative_to_project_root # e.g. "deploy/my-server"
+            )
             
-            # Deploy to Cloud Run using the container.sh script
-            service_name_for_run_cli = name # For gcloud CLI, service_id is just the name
-            logger.info(f"Deploying service {service_name_for_run_cli} to Cloud Run using container.sh with image {image}")
+            service_name_for_run_cli = name 
+            logger.info(f"Deploying service {service_name_for_run_cli} to Cloud Run using container.sh with image {image_name} on port {container_port}")
 
             container_script_path = os.path.join(os.path.dirname(__file__), "container.sh")
 
-            # Make sure the script is executable
             if not os.access(container_script_path, os.X_OK):
                 os.chmod(container_script_path, 0o755)
             
@@ -164,29 +182,124 @@ class DeploymentManager:
                 subprocess.run([
                     container_script_path,
                     service_name_for_run_cli,
-                    image,
+                    image_name,
                     self.project_id,
-                    self.region
-                    # Optionally, pass port, CPU, memory if different from script defaults
-                    # "8080", 
-                    # "1", 
-                    # "512Mi" 
-                ], check=True, capture_output=True) # Capture output to see logs from script
+                    self.region,
+                    str(container_port), # Pass container_port to container.sh
+                    "1",  # Default CPU for container.sh
+                    "512Mi",  # Default Memory for container.sh
+                    startup_probe_path if startup_probe_path is not None else "" # Pass startup_probe_path or empty string
+                ], check=True, capture_output=True)
                 logger.info(f"Cloud Run deployment script for service {name} executed successfully.")
             except subprocess.CalledProcessError as e:
                 logger.error(f"Cloud Run deployment script failed for service {name}: {e.stderr.decode()}")
                 raise
 
-            # Get the service URL
             service_url = self.get_service_url(name)
+            if not service_url:
+                 raise Exception(f"Failed to get service URL for {name} after deployment.")
             return service_url
             
         except Exception as e:
-            logger.error(f"Deployment failed: {str(e)}")
+            logger.error(f"Deployment failed for server '{name}': {str(e)}")
             # Clean up on failure
-            if os.path.exists(deploy_dir):
-                shutil.rmtree(deploy_dir)
+            if 'full_deploy_dir_path' in locals() and os.path.exists(full_deploy_dir_path):
+                shutil.rmtree(full_deploy_dir_path)
             raise e
+
+    def deploy_git_repository(self, service_name: str, git_repo_url: str, dockerfile_path_in_repo: str = "Dockerfile", container_port: int = 8080, startup_probe_path: Optional[str] = None, env_vars: Optional[Dict[str, str]] = None) -> str:
+        """Clones a Git repository and deploys it as a Cloud Run service using its Dockerfile.
+
+        Args:
+            service_name: The name for the Cloud Run service.
+            git_repo_url: The URL of the Git repository.
+            dockerfile_path_in_repo: Relative path to the Dockerfile within the repository. Defaults to "Dockerfile".
+            container_port: The port the application inside the container is expected to listen on.
+                            Cloud Run will set the PORT env var to this value. User's app must honor this.
+            startup_probe_path: Optional. The HTTP path for the startup probe. Defaults to '/'.
+            env_vars: Optional. A dictionary of environment variables to set in the container.
+
+        Returns:
+            The deployed service URL.
+
+        Raises:
+            Exception: If any step of the cloning, building, or deployment process fails.
+        """
+        temp_clone_dir = tempfile.mkdtemp(prefix=f"mcp_deploy_git_{service_name}_")
+        logger.info(f"Cloning repository {git_repo_url} into {temp_clone_dir}")
+
+        try:
+            self._ensure_artifact_repository_exists()
+            
+            # Clone the repository
+            try:
+                git.Repo.clone_from(git_repo_url, temp_clone_dir)
+                logger.info(f"Successfully cloned repository to {temp_clone_dir}")
+            except git.GitCommandError as e:
+                logger.error(f"Failed to clone repository {git_repo_url}: {e.stderr}")
+                raise Exception(f"Git clone failed: {e.stderr}") from e
+
+            # Determine paths
+            build_context_abs_path = temp_clone_dir
+            dockerfile_abs_path = os.path.join(build_context_abs_path, dockerfile_path_in_repo)
+
+            if not os.path.isfile(dockerfile_abs_path):
+                raise FileNotFoundError(f"Dockerfile not found at {dockerfile_abs_path} in the cloned repository.")
+
+            image_name = f"{self.artifact_registry_domain}/{self.project_id}/{self.artifact_repository_name}/{service_name}"
+            logger.info(f"Building and pushing image for Git repo: {image_name}")
+
+            # Build and push the Docker image from the cloned repo.
+            # No DEPLOY_DIR_ARG is needed here as the repo's Dockerfile should be self-sufficient.
+            self._run_deploy_script(
+                image_name=image_name,
+                dockerfile_abs_path=dockerfile_abs_path,
+                build_context_abs_path=build_context_abs_path,
+                deploy_dir_build_arg=None # User's Dockerfile is self-contained
+            )
+
+            # Deploy to Cloud Run using container.sh
+            logger.info(f"Deploying service {service_name} to Cloud Run using container.sh with image {image_name} on port {container_port}")
+            container_script_path = os.path.join(os.path.dirname(__file__), "container.sh")
+            if not os.access(container_script_path, os.X_OK):
+                os.chmod(container_script_path, 0o755)
+
+            env_vars_string = ""
+            if env_vars:
+                env_vars_string = ",".join([f"{k}={v}" for k, v in env_vars.items()])
+
+            try:
+                subprocess.run([
+                    container_script_path,
+                    service_name,
+                    image_name,
+                    self.project_id,
+                    self.region,
+                    str(container_port),
+                    "1",  # Default CPU
+                    "512Mi",  # Default Memory
+                    startup_probe_path if startup_probe_path is not None else "",
+                    env_vars_string # Pass formatted env vars string
+                ], check=True, capture_output=True)
+                logger.info(f"Cloud Run deployment script for service {service_name} executed successfully.")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Cloud Run deployment script failed for service {service_name}: {e.stderr.decode()}")
+                raise
+
+            service_url = self.get_service_url(service_name)
+            if not service_url:
+                raise Exception(f"Failed to get service URL for {service_name} after git repo deployment.")
+            return service_url
+
+        except Exception as e:
+            logger.error(f"Deployment of Git repository {git_repo_url} as service '{service_name}' failed: {str(e)}")
+            raise
+        finally:
+            # Clean up the temporary clone directory
+            if os.path.exists(temp_clone_dir):
+                shutil.rmtree(temp_clone_dir)
+                logger.info(f"Cleaned up temporary clone directory: {temp_clone_dir}")
+
 
     def delete_server(self, name: str, delete_local_file: bool = True):
         """Delete a Cloud Run service using gcloud and optionally its local configuration file."""
@@ -206,11 +319,11 @@ class DeploymentManager:
                 # However, if it's a permission error, we should log it prominently.
                 # The error message you saw (403 Permission denied) will be in stderr.
                 if "denied" in result.stderr.lower() or "permission" in result.stderr.lower():
-                     logger.error(f"Permission error deleting service '{name}' with gcloud: {{result.stderr.strip()}}")
+                     logger.error(f"Permission error deleting service '{name}' with gcloud: {result.stderr.strip()}")
                      # Optionally, re-raise an exception here if you want the CLI to stop more forcefully
-                     # raise Exception(f"gcloud permission error: {{result.stderr.strip()}}")
+                     # raise Exception(f"gcloud permission error: {result.stderr.strip()}")
                 elif "not found" not in result.stderr.lower(): # If not a 'not found' error (which --quiet should handle)
-                     logger.warning(f"gcloud command to delete service '{name}' exited with code {{result.returncode}}. Stderr: {{result.stderr.strip()}}")
+                     logger.warning(f"gcloud command to delete service '{name}' exited with code {result.returncode}. Stderr: {result.stderr.strip()}")
                 # else: service not found, --quiet handles this, proceed with local cleanup
             else:
                 logger.info(f"Cloud Run service '{name}' deleted successfully or was already gone.")
@@ -221,30 +334,30 @@ class DeploymentManager:
             # raise
         except Exception as e:
             # Catch any other unexpected errors during the gcloud call itself
-            logger.error(f"An unexpected error occurred while trying to delete service '{name}' via gcloud: {{e}}")
+            logger.error(f"An unexpected error occurred while trying to delete service '{name}' via gcloud: {e}")
             # raise # Optionally re-raise
 
         # Proceed with local file and directory cleanup regardless of remote deletion status, 
         # as the goal is to remove the server configuration from the local environment as well.
         try:
-            deploy_dir = f"deploy/{{name}}"
+            deploy_dir = f"deploy/{name}"
             if os.path.exists(deploy_dir):
                 shutil.rmtree(deploy_dir)
-                logger.info(f"Removed local deployment directory: {{deploy_dir}}")
+                logger.info(f"Removed local deployment directory: {deploy_dir}")
             
             if delete_local_file:
-                local_server_file = f"servers/{{name}}.py"
+                local_server_file = f"servers/{name}.py"
                 if os.path.exists(local_server_file):
                     os.remove(local_server_file)
-                    logger.info(f"Removed local server file: {{local_server_file}}")
+                    logger.info(f"Removed local server file: {local_server_file}")
                 elif not os.path.exists(local_server_file) and not result.returncode == 0 and "not found" in result.stderr.lower():
                     # If local file was already gone and remote service also not found.
                     pass # No specific message needed if both were already gone.
                 elif not os.path.exists(local_server_file):
-                     logger.info(f"Local server file {{local_server_file}} not found, no local file to remove.")
+                     logger.info(f"Local server file {local_server_file} not found, no local file to remove.")
 
         except Exception as e:
-            logger.error(f"Error during local file cleanup for server '{name}': {{e}}")
+            logger.error(f"Error during local file cleanup for server '{name}': {e}")
 
     def get_service_url(self, name: str) -> Optional[str]:
         """Get the URL of a deployed Cloud Run service using gcloud.
@@ -302,5 +415,5 @@ class DeploymentManager:
             logger.error("Error: gcloud command not found. Please ensure it's installed and in your PATH.")
             return []
         except json.JSONDecodeError as e:
-            logger.error(f"Error parsing JSON from gcloud services list: {{e}}")
+            logger.error(f"Error parsing JSON from gcloud services list: {e}")
             return [] 

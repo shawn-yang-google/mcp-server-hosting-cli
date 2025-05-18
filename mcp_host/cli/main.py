@@ -294,8 +294,10 @@ def create_server(
 def deploy_server(
     name: str = typer.Option(..., help="Name of the MCP server to deploy"),
     project: str = typer.Option(None, help="GCP project ID to deploy to (overrides environment variable)"),
+    container_port: Optional[int] = typer.Option(8080, "--container-port", "-cp", help="The port the application inside the container will listen on. Cloud Run sets the PORT env var to this value. The server_template.py respects this by default."),
+    startup_probe_path: Optional[str] = typer.Option(None, "--startup-probe-path", "-spp", help="Optional HTTP GET path for the Cloud Run startup probe (e.g., '/healthz', '/sse'). Defaults to Cloud Run's default ('/')."),
 ):
-    """Deploy the configured MCP server."""
+    """Deploy the configured MCP server (uses server_template.py and root Dockerfile)."""
     server_file = f"servers/{name}.py"
     if not os.path.exists(server_file):
         console.print(f"[red]Error: Server '{name}' not found[/red]")
@@ -312,14 +314,74 @@ def deploy_server(
             console.print(f"[yellow]Using project: {project}[/yellow]")
 
         # Deploy to Cloud Run
-        console.print(f"[yellow]Deploying server '{name}' to Cloud Run...[/yellow]")
-        service_url = deploy_manager.deploy_server(name, server_file)
+        console.print(f"[yellow]Deploying server '{name}' to Cloud Run... (container port: {container_port})[/yellow]")
+        service_url = deploy_manager.deploy_server(
+            name, 
+            server_file, 
+            container_port=container_port,
+            startup_probe_path=startup_probe_path
+        )
         
         console.print(f"[green]Successfully deployed server '{name}'[/green]")
         console.print(Panel(f"Server URL: {service_url}", title="Deployment Info"))
         
     except Exception as e:
         console.print(f"[red]Error deploying server: {str(e)}[/red]")
+
+@cli.command("deploy-git-repo")
+def deploy_git_repo(
+    name: str = typer.Option(..., "--name", "-n", help="Name for the new Cloud Run service."),
+    git_repo_url: str = typer.Option(..., "--git-repo-url", "-g", help="URL of the Git repository to deploy."),
+    dockerfile_path: str = typer.Option("Dockerfile", "--dockerfile-path", "-d", help="Path to the Dockerfile within the repository."),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="GCP project ID to deploy to."),
+    container_port: Optional[int] = typer.Option(8080, "--container-port", "-cp", help="The port your application inside the container listens on."),
+    startup_probe_path: Optional[str] = typer.Option(None, "--startup-probe-path", "-spp", help="Optional HTTP GET path for the Cloud Run startup probe."),
+    env: List[str] = typer.Option([], "--env", "-e", help="Environment variables to set in the container (e.g., KEY=VALUE). Can be specified multiple times."),
+):
+    """Clones a Git repository, builds its Docker image, and deploys it to Cloud Run."""
+    console.print(f"[yellow]Starting deployment for Git repository: {git_repo_url}[/yellow]")
+    console.print(f"  Service Name: {name}")
+    console.print(f"  Dockerfile Path in Repo: {dockerfile_path}")
+    console.print(f"  Container Port: {container_port}")
+
+    parsed_env_vars: Dict[str, str] = {}
+    if env:
+        for item in env:
+            if "=" not in item:
+                console.print(f"[yellow]Warning: Skipping malformed environment variable '[b]{item}[/b]'. Expected format: KEY=VALUE.[/yellow]")
+                continue
+            key, value = item.split("=", 1)
+            parsed_env_vars[key] = value
+        console.print(f"  Environment Variables: {parsed_env_vars}")
+
+    try:
+        # Use a specific deployment manager instance if project is overridden
+        current_deployment_manager = deployment_manager
+        if project:
+            current_deployment_manager = DeploymentManager(
+                project_id=project,
+                region=deployment_manager.region # Keep the original region
+            )
+            console.print(f"[yellow]Using project: {project}[/yellow]")
+        
+        console.print(f"[yellow]Deploying service '{name}' from Git repository to Cloud Run...[/yellow]")
+        service_url = current_deployment_manager.deploy_git_repository(
+            service_name=name,
+            git_repo_url=git_repo_url,
+            dockerfile_path_in_repo=dockerfile_path,
+            container_port=container_port,
+            startup_probe_path=startup_probe_path,
+            env_vars=parsed_env_vars # Pass parsed env vars
+        )
+        
+        console.print(f"[green]Successfully deployed service '{name}' from Git repository.[/green]")
+        console.print(Panel(f"Service URL: {service_url}", title="Deployment Info"))
+        
+    except FileNotFoundError as e: # Specifically catch FileNotFoundError if Dockerfile isn't found in repo
+        console.print(f"[red]Error: {str(e)}[/red]")
+        console.print(f"[dim]Please ensure the Dockerfile exists at '{dockerfile_path}' within the repository '{git_repo_url}'.[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error deploying Git repository: {str(e)}[/red]")
 
 @cli.command()
 def list_servers():
@@ -351,46 +413,96 @@ def delete_server(
 ):
     """Delete a deployed MCP server."""
     server_file = f"servers/{name}.py"
-    if not os.path.exists(server_file):
-        console.print(f"[red]Error: Server '{name}' not found[/red]")
-        return
+    # For git-deployed servers, there might not be a local server file.
+    # We should primarily check if the service exists on Cloud Run.
+    # The DeploymentManager.delete_server handles deleting the Cloud Run service
+    # and then tries to delete local files if they exist (controlled by delete_local_file=True by default).
 
+    # It is better to let deployment_manager.delete_server handle the logic
+    # of whether a local file exists or not. 
+    # We just need to ensure we call it. The `delete_local_file` argument in `delete_server` 
+    # defaults to True, so it will attempt to remove `servers/{name}.py` if it exists.
+    # If deploying from Git, this file might not exist, which is fine.
+
+    # We might want to consider how to clean up the `deploy/{name}` directory for git-deployed services.
+    # Currently, `delete_server` in DeploymentManager removes `deploy/{name}`. This should be okay.
+
+    console.print(f"[yellow]Attempting to delete server '{name}'...[/yellow]")
     try:
-        # Delete from Cloud Run
-        console.print(f"[yellow]Deleting server '{name}' from Cloud Run...[/yellow]")
-        deployment_manager.delete_server(name)
-        
-        # Remove server file
-        os.remove(server_file)
-        console.print(f"[green]Successfully deleted server '{name}'[/green]")
+        deployment_manager.delete_server(name) # delete_local_file defaults to True
+        console.print(f"[green]Successfully initiated deletion for server '{name}'. Check logs for details.[/green]")
+        console.print(f"[dim]Note: If '{name}' was deployed from a Git repository, its local cloned files (if any were persisted) are not automatically removed by this command beyond the standard 'deploy/{name}' and 'servers/{name}.py' cleanup.[/dim]")
+
     except Exception as e:
-        console.print(f"[red]Error deleting server: {str(e)}[/red]")
+        console.print(f"[red]Error during server deletion for '{name}': {str(e)}[/red]")
 
 @cli.command()
 def get_server_url(
     name: str = typer.Option(..., help="Name of the MCP server to get the URL for"),
+    raw: bool = typer.Option(False, "--raw", help="Output only the raw URL string, without any formatting."),
 ):
     """Get the URL of a deployed MCP server."""
-    console.print(f"[yellow]Fetching URL for server '{name}'...[/yellow]")
+    if not raw:
+        console.print(f"[yellow]Fetching URL for server '{name}'...[/yellow]")
+    
     service_url = deployment_manager.get_service_url(name)
 
     if service_url:
-        console.print(Panel(f"Server URL: {service_url}", title=f"URL for {name}"))
+        if raw:
+            print(service_url) # Just print the raw URL
+        else:
+            console.print(Panel(f"Server URL: {service_url}", title=f"URL for {name}"))
     else:
-        console.print(f"[red]Could not retrieve URL for server '{name}'. It might not be deployed or an error occurred.[/red]")
+        if not raw:
+            console.print(f"[red]Could not retrieve URL for server '{name}'. It might not be deployed or an error occurred.[/red]")
+        else:
+            # Print nothing or an error to stderr if raw and not found, to avoid capturing "None" or an error message.
+            # For scripting, an empty stdout and a non-zero exit code would be ideal on failure.
+            # The get_service_url in deployment.py already returns None or prints to stderr.
+            # So if service_url is None, raw print will output nothing, which is fine.
+            pass 
+        # Consider exiting with an error code if not found, even in raw mode,
+        # so scripts can check $?
+        # For now, if not found, raw will print nothing to stdout.
 
 @cli.command("get-server-capabilities")
 def get_server_capabilities(
-    url: Optional[str] = typer.Option(None, "--url", "-u", help="URL of the MCP server. If provided, this URL is used directly, overriding the name lookup. Example: http://localhost:10000/sse"),
-    name: str = typer.Option(..., help="Name of the MCP server to generate a client script for"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Name of the deployed MCP server. Used if --url is not provided."),
+    url: Optional[str] = typer.Option(None, "--url", "-u", help="Full URL of the MCP server endpoint. If provided, this is used directly, overriding name and endpoint-suffix. Example: http://localhost:10000/custom_sse"),
+    endpoint_suffix: str = typer.Option("/sse", "--endpoint-suffix", "-es", show_default=True, help="Suffix to append to the base server URL if --name is used and --url is not. Use \"\" for no suffix."),
 ):
-    """Generate a client script for an MCP server."""
-    if not url:
-        url = deployment_manager.get_service_url(name) + "/sse"
-        if not url:
-            console.print(f"[red]Error: Server '{name}' not found[/red]")
-            return
-    asyncio.run(discover_mcp_capabilities(url))
+    """Discovers and lists capabilities of a deployed MCP server."""
+    final_url: Optional[str] = None
+
+    if url:
+        final_url = url
+        console.print(f"[dim]Using provided direct URL: {final_url}[/dim]")
+    elif name:
+        console.print(f"[dim]Looking up server by name: {name}[/dim]")
+        base_url = deployment_manager.get_service_url(name)
+        if not base_url:
+            console.print(f"[red]Error: Server '{name}' not found or its URL could not be retrieved.[/red]")
+            raise typer.Exit(code=1)
+        
+        cleaned_base_url = base_url.rstrip("/")
+        
+        actual_suffix = endpoint_suffix
+        if endpoint_suffix and not endpoint_suffix.startswith("/") and endpoint_suffix != "":
+            actual_suffix = "/" + endpoint_suffix
+        elif endpoint_suffix is None: # Should be handled by Typer default, but defensive
+            actual_suffix = ""
+            
+        final_url = cleaned_base_url + actual_suffix
+        console.print(f"[dim]Constructed URL: {final_url} (base: {base_url}, suffix: '{endpoint_suffix}') [/dim]")
+    else:
+        console.print("[red]Error: You must provide either --url or --name.[/red]")
+        raise typer.Exit(code=1)
+
+    if not final_url: 
+        console.print("[red]Error: Could not determine the server URL.[/red]")
+        raise typer.Exit(code=1)
+        
+    asyncio.run(discover_mcp_capabilities(final_url))
 
 def print_items(name: str, items_list: list) -> None:
     """Print items with formatting.
@@ -460,39 +572,45 @@ async def discover_mcp_capabilities(server_sse_url: str):
 def call_tool(
     tool_name: str = typer.Argument(..., help="Name of the tool to call."),
     tool_args: List[str] = typer.Option(
-        [],  # Default to an empty list
+        [],
         "--tool-arg",
         "-ta",
         help="Tool arguments in key=value format. Values are parsed as Python literals (e.g., 'numbers=[1,2,3]', 'enabled=True', 'name=\"Alice\"'). For simple unquoted strings (e.g. 'operation=add'), quotes are optional. Can be specified multiple times."
     ),
-    url: Optional[str] = typer.Option(
-        None,
-        "--url",
-        "-u",
-        help="URL of the MCP server's SSE endpoint. If provided, this URL is used directly, overriding the name lookup. Example: http://localhost:10000/sse"
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        "-n",
-        help="Name of the MCP server (from deployment config) to connect to. Used if --url is not provided."
-    ),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Name of the deployed MCP server. Used if --url is not provided."),
+    url: Optional[str] = typer.Option(None, "--url", "-u", help="Full URL of the MCP server endpoint. If provided, this is used directly, overriding name and endpoint-suffix. Example: http://localhost:10000/custom_path"),
+    endpoint_suffix: str = typer.Option("/sse", "--endpoint-suffix", "-es", show_default=True, help="Suffix to append to the base server URL if --name is used and --url is not. Use \"\" for no suffix."),
 ):
-    """Call a specified tool on an MCP server with given arguments."""
-    server_sse_url: str
+    """Calls a specified tool on an MCP server with given arguments."""
+    final_url: Optional[str] = None
+
     if url:
-        server_sse_url = url
-    else:
-        if not name:
-            console.print(f"[red]Error: Must define either --url or --name when calling a tool.[/red]")
-            raise typer.Exit(code=1)
-        # Assuming deployment_manager is available in this scope.
-        resolved_url_base = deployment_manager.get_service_url(name)
-        if not resolved_url_base:
+        final_url = url
+        console.print(f"[dim]Using provided direct URL: {final_url}[/dim]")
+    elif name:
+        console.print(f"[dim]Looking up server by name: {name}[/dim]")
+        base_url = deployment_manager.get_service_url(name)
+        if not base_url:
             console.print(f"[red]Error: Server '{name}' not found or its URL could not be retrieved.[/red]")
             raise typer.Exit(code=1)
-        # Append /sse similar to get-server-capabilities logic
-        server_sse_url = resolved_url_base + "/sse"
+        
+        cleaned_base_url = base_url.rstrip("/")
+        
+        actual_suffix = endpoint_suffix
+        if endpoint_suffix and not endpoint_suffix.startswith("/") and endpoint_suffix != "":
+            actual_suffix = "/" + endpoint_suffix
+        elif endpoint_suffix is None: 
+            actual_suffix = ""
+            
+        final_url = cleaned_base_url + actual_suffix
+        console.print(f"[dim]Constructed URL: {final_url} (base: {base_url}, suffix: '{endpoint_suffix}') [/dim]")
+    else:
+        console.print("[red]Error: You must provide either --url or --name to identify the server.[/red]")
+        raise typer.Exit(code=1)
+
+    if not final_url:
+        console.print("[red]Error: Could not determine the server URL for the tool call.[/red]")
+        raise typer.Exit(code=1)
 
     parsed_tool_kwargs: Dict[str, Any] = {}
     if tool_args:
@@ -520,7 +638,7 @@ def call_tool(
         raise typer.Exit(code=1)
 
     # Assuming call_mcp_tool is defined in the same file or imported.
-    asyncio.run(call_mcp_tool(server_sse_url, tool_name, **parsed_tool_kwargs))
+    asyncio.run(call_mcp_tool(final_url, tool_name, **parsed_tool_kwargs))
 
 async def call_mcp_tool(server_sse_url: str, tool_name: str, **tool_kwargs):
     """
